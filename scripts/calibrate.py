@@ -1,82 +1,65 @@
+# scripts/calibrate.py
 import pandas as pd
+import joblib
+from sklearn.linear_model import LinearRegression
 import torch
 from transformers import AutoTokenizer, AutoModel
-from sklearn.linear_model import LinearRegression
-import joblib
+import sys, os
 
-# -------------------------
-# Paths & Setup
-# -------------------------
-TRAIN_PATH = "data/aes_dataset/training_set_rel3.tsv"
+DATA_PATH = "data/aes_dataset/training_set_rel3.tsv"
 MODEL_PATH = "models/bert_regressor.pt"
-CALIBRATION_PATH = "models/calibration.pkl"
+CALIBRATION_PATH = "models/calibration_set{}.pkl"  # <-- per set
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# -------------------------
-# Load Tokenizer & Model
-# -------------------------
+# ---------------- Model ----------------
 tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
 
 class BertRegressor(torch.nn.Module):
     def __init__(self, bert_model):
-        super(BertRegressor, self).__init__()
+        super().__init__()
         self.bert = bert_model
         self.out = torch.nn.Linear(768, 1)
 
     def forward(self, input_ids, attention_mask):
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-        pooled_output = outputs.last_hidden_state[:, 0]  # CLS token
-        score = self.out(pooled_output)
-        return score
+        pooled_output = outputs.last_hidden_state[:, 0]
+        return self.out(pooled_output)
 
-# Load trained model
 bert = AutoModel.from_pretrained("bert-base-uncased")
 model = BertRegressor(bert).to(DEVICE)
 model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
 model.eval()
 
-# -------------------------
-# Load dataset
-# -------------------------
-df = pd.read_csv(TRAIN_PATH, sep="\t", encoding="ISO-8859-1")
-essays = df["essay"].astype(str).tolist()
-teacher_scores = df["domain1_score"].tolist()
+def get_score(essay):
+    tokens = tokenizer(essay, return_tensors="pt", truncation=True, padding="max_length", max_length=512)
+    with torch.no_grad():
+        return model(tokens["input_ids"].to(DEVICE), tokens["attention_mask"].to(DEVICE)).item()
 
-print(f"📊 Loaded {len(essays)} essays for calibration")
+# ---------------- Main ----------------
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("❌ Usage: python scripts/calibrate.py <essay_set>")
+        sys.exit(1)
 
-# -------------------------
-# Get raw model predictions
-# -------------------------
-raw_preds = []
-with torch.no_grad():
-    for essay in essays:
-        tokens = tokenizer(
-            essay,
-            return_tensors="pt",
-            max_length=512,
-            truncation=True,
-            padding="max_length"
-        )
-        input_ids = tokens["input_ids"].to(DEVICE)
-        attention_mask = tokens["attention_mask"].to(DEVICE)
+    essay_set = int(sys.argv[1])
+    print(f"📂 Calibrating for essay_set = {essay_set}")
 
-        raw_score = model(input_ids, attention_mask).item()
-        raw_preds.append(raw_score)
+    df = pd.read_csv(DATA_PATH, sep="\t", encoding="ISO-8859-1")
+    df = df[df["essay_set"] == essay_set]  # filter only one set
+    essays = df["essay"].astype(str).tolist()
+    teacher_scores = df["domain1_score"].tolist()
 
-print("✅ Raw predictions collected")
+    raw_preds = [get_score(e) for e in essays]
 
-# -------------------------
-# Fit calibration model
-# -------------------------
-calibrator = LinearRegression()
-calibrator.fit([[p] for p in raw_preds], teacher_scores)
+    # Train calibration mapping
+    calibrator = LinearRegression().fit([[r] for r in raw_preds], teacher_scores)
 
-print("✅ Calibration model trained")
+    score_range = (min(teacher_scores), max(teacher_scores))
+    out_path = CALIBRATION_PATH.format(essay_set)
+    os.makedirs("models", exist_ok=True)
+    joblib.dump({"calibrator": calibrator, "score_range": score_range}, out_path)
 
-# -------------------------
-# Save calibrator + score range
-# -------------------------
-score_range = (min(teacher_scores), max(teacher_scores))  # actual teacher min/max
-joblib.dump({"calibrator": calibrator, "score_range": score_range}, CALIBRATION_PATH)
-
-print(f"💾 Saved calibration model + score range → {CALIBRATION_PATH}")
+    print(f"✅ Calibration trained for set {essay_set}")
+    print(f"   Teacher score range = {score_range}")
+    print(f"💾 Saved -> {out_path}")
