@@ -1,15 +1,47 @@
 import pandas as pd
 
-df = pd.read_csv("Phase5 data training.csv")
+INPUT = "akura_dataset.csv"
+OUTPUT = "sinhala_dataset_final.csv"
 
-clean_df = pd.DataFrame({
-    "essay_text": df["essay_text"].astype(str),
-    "grade": df["grade"].astype(int),
-    "topic": df["essay_topic"].astype(str),
-    "teacher_score": df["normalized_score"].astype(float)
-})
+df = pd.read_csv(INPUT)
 
-clean_df.to_csv("sinhala_dataset_for_training.csv", index=False)
+required = [
+    "essay_text",
+    "grade",
+    "richness_5",
+    "organization_6",
+    "technical_3",
+    "total_14"
+]
 
-print("✅ Sinhala dataset prepared!")
-print(clean_df.head())
+# Validate
+for c in required:
+    if c not in df.columns:
+        raise ValueError(f"Missing column: {c}")
+
+# Clean numerics
+numeric_cols = ["grade", "richness_5", "organization_6", "technical_3", "total_14"]
+for col in numeric_cols:
+    df[col] = pd.to_numeric(df[col], errors="coerce")
+
+df = df.dropna(subset=numeric_cols)
+
+# Build conditioning input text
+df["input_text"] = df.apply(
+    lambda r: f"<GRADE={int(r['grade'])}> {str(r['essay_text'])}",
+    axis=1
+)
+
+# Final dataset
+df = df[[
+    "input_text",
+    "grade",
+    "richness_5",
+    "organization_6",
+    "technical_3",
+    "total_14"
+]]
+
+df.to_csv(OUTPUT, index=False, encoding="utf-8-sig")
+print("✔ CLEAN dataset saved:", OUTPUT)
+print("✔ Total rows:", len(df))
