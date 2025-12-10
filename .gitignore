@@ -20,3 +20,13 @@ outputs/
 # System
 .DS_Store
 Thumbs.db
+
+# Ignore HuggingFace model folders completely
+xlm-roberta-large-sinhala-multihead/
+xlm-roberta-base_sinhala_multihead.pt
+
+# (Optional) Ignore any local HF model directories
+*.bin
+*.json
+*.pt
+
