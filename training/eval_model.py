@@ -1,5 +1,3 @@
-# training/eval_model.py
-
 import torch
 import pandas as pd
 from scipy.stats import pearsonr
@@ -10,17 +8,26 @@ from .dataset_loader import load_sinhala_dataset, build_splits
 from .model_multitask_xlmr import SinhalaMultiHeadRegressor
 
 
-def evaluate_model(model_path, csv_path="sinhala_dataset_final.csv"):
-    print(f"\n🔍 Evaluating model: {model_path}")
+# =============================
+# DEVICE
+# =============================
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
+def evaluate_model(
+    model_path: str,
+    csv_path: str = "sinhala_dataset_final.csv"
+):
+    print(f"\n🔍 Evaluating model from: {model_path}")
+
+    # ---- Load dataset
     df = load_sinhala_dataset(csv_path)
     train_df, val_df = build_splits(df)
 
-    base_model = "xlm-roberta-large"
-
-    tokenizer = AutoTokenizer.from_pretrained(base_model)
-    model = SinhalaMultiHeadRegressor(base_model)
-    model.load_state_dict(torch.load(model_path, map_location="cpu"))
+    # ---- HF-CORRECT LOADING (SAME AS BACKEND)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    model = SinhalaMultiHeadRegressor.from_pretrained(model_path)
+    model.to(DEVICE)
     model.eval()
 
     y_true = []
@@ -38,28 +45,38 @@ def evaluate_model(model_path, csv_path="sinhala_dataset_final.csv"):
             max_length=512
         )
 
-        # grade embedding input
-        grade_id = torch.tensor([int(row["grade"])], dtype=torch.long)
+        input_ids = enc["input_ids"].to(DEVICE)
+        attention_mask = enc["attention_mask"].to(DEVICE)
+
+        grade_id = torch.tensor(
+            [int(row["grade"])],
+            dtype=torch.long,
+            device=DEVICE
+        )
 
         with torch.no_grad():
-            out = model(
-                enc["input_ids"],
-                enc["attention_mask"],
-                grade_id
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                grade_id=grade_id
             )
 
-        pred_total = out["total_14"].item()
+        pred_richness = outputs["richness_5"].item()
+        pred_org = outputs["organization_6"].item()
+        pred_tech = outputs["technical_3"].item()
 
-        y_true.append(row["total_14"])
+        pred_total = pred_richness + pred_org + pred_tech
+
+
+        y_true.append(float(row["total_14"]))
         y_pred.append(pred_total)
 
-    # ---- METRICS ----
+    # =============================
+    # METRICS
+    # =============================
     mae = mean_absolute_error(y_true, y_pred)
-
-    # FIXED: no squared parameter
     mse = mean_squared_error(y_true, y_pred)
     rmse = mse ** 0.5
-
     r, _ = pearsonr(y_true, y_pred)
 
     print("\n📊 === Evaluation Results ===")
@@ -71,7 +88,16 @@ def evaluate_model(model_path, csv_path="sinhala_dataset_final.csv"):
     print("Predicted :", [round(x, 2) for x in y_pred])
 
 
+# =============================
+# ENTRY POINT
+# =============================
 if __name__ == "__main__":
     import sys
+
+    if len(sys.argv) < 2:
+        raise ValueError(
+            "Usage: python -m training.eval_model <MODEL_DIR>"
+        )
+
     model_path = sys.argv[1]
     evaluate_model(model_path)

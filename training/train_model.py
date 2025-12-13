@@ -2,19 +2,26 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 from tqdm import tqdm
-from transformers import AutoTokenizer
+
+from transformers import AutoTokenizer, AutoConfig
 
 from .dataset_loader import load_sinhala_dataset, build_splits
 from .model_multitask_xlmr import SinhalaMultiHeadRegressor
 
 
+# =============================
+# DEVICE
+# =============================
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("🔥 Using device:", DEVICE)
 
 
+# =============================
+# DATASET
+# =============================
 class SinhalaDataset(Dataset):
     def __init__(self, df, tokenizer, max_len=512):
-        self.df = df
+        self.df = df.reset_index(drop=True)
         self.tokenizer = tokenizer
         self.max_len = max_len
 
@@ -35,53 +42,103 @@ class SinhalaDataset(Dataset):
         return {
             "input_ids": enc["input_ids"].squeeze(0),
             "attention_mask": enc["attention_mask"].squeeze(0),
-            "grade_ids": torch.tensor(row["grade"], dtype=torch.long),
-            "richness_5": torch.tensor(row["richness_5"], dtype=torch.float),
-            "organization_6": torch.tensor(row["organization_6"], dtype=torch.float),
-            "technical_3": torch.tensor(row["technical_3"], dtype=torch.float),
-            "total_14": torch.tensor(row["total_14"], dtype=torch.float),
+            "grade_id": torch.tensor(row["grade"], dtype=torch.long),
+
+            # targets
+            "richness": torch.tensor(row["richness_5"], dtype=torch.float),
+            "organization": torch.tensor(row["organization_6"], dtype=torch.float),
+            "technical": torch.tensor(row["technical_3"], dtype=torch.float),
+            "total": torch.tensor(row["total_14"], dtype=torch.float),
         }
 
 
-def train_model(model_name, csv_path="sinhala_dataset_final.csv",
-                epochs=20, batch_size=4, lr=3e-5):
+# =============================
+# TRAINING LOOP
+# =============================
+def train_model(
+    model_name: str,
+    csv_path: str = "sinhala_dataset_final.csv",
+    epochs: int = 20,
+    batch_size: int = 4,
+    lr: float = 3e-5,
+):
+    print(f"\n🚀 Training Sinhala Multi-Head Model using: {model_name}")
 
-    print(f"\n🚀 Training Multi-Head Model using: {model_name}")
-
+    # ---- Load dataset
     df = load_sinhala_dataset(csv_path)
     train_df, val_df = build_splits(df)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # ---- Tokenizer (SOURCE OF TRUTH)
+    tokenizer = AutoTokenizer.from_pretrained(
+    model_name,
+    use_fast=True
+)
+
 
     train_ds = SinhalaDataset(train_df, tokenizer)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
 
-    model = SinhalaMultiHeadRegressor(model_name).to(DEVICE)
+    # ---- Config + Model (HF-SAFE)
+    config = AutoConfig.from_pretrained(model_name)
+    model = SinhalaMultiHeadRegressor(config).to(DEVICE)
 
+
+    # =============================
+    # PARTIAL FINE-TUNING (CRITICAL)
+    # =============================
+
+    # Freeze entire encoder
+    for param in model.encoder.parameters():
+        param.requires_grad = False
+
+    # Unfreeze last 4 transformer layers
+    for layer in model.encoder.encoder.layer[-4:]:
+        for param in layer.parameters():
+            param.requires_grad = True
+
+    # =============================
+    # MODEL IDENTITY (NICE-TO-HAVE)
+    # =============================
+    model.config.architectures = ["SinhalaMultiHeadRegressor"]
+
+    # ---- Optim (ONLY trainable params)
     loss_fn = torch.nn.SmoothL1Loss()
-    optimizer = AdamW(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    optimizer = AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=lr
+    )
 
+
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=epochs
+    )
+
+    # =============================
+    # EPOCHS
+    # =============================
     for epoch in range(epochs):
         model.train()
-        total_loss = 0
+        total_loss = 0.0
 
-        for batch in tqdm(train_loader):
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}"):
 
             optimizer.zero_grad()
 
             input_ids = batch["input_ids"].to(DEVICE)
             attention_mask = batch["attention_mask"].to(DEVICE)
-            grade_ids = batch["grade_ids"].to(DEVICE)
+            grade_id = batch["grade_id"].to(DEVICE)
 
-            out = model(input_ids, attention_mask, grade_ids)
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                grade_id=grade_id
+            )
 
-            # Weighted loss
             loss = (
-                0.2 * loss_fn(out["richness_5"], batch["richness_5"].to(DEVICE)) +
-                0.2 * loss_fn(out["organization_6"], batch["organization_6"].to(DEVICE)) +
-                0.2 * loss_fn(out["technical_3"], batch["technical_3"].to(DEVICE)) +
-                0.4 * loss_fn(out["total_14"], batch["total_14"].to(DEVICE))
+                0.2 * loss_fn(outputs["richness_5"], batch["richness"].to(DEVICE)) +
+                0.2 * loss_fn(outputs["organization_6"], batch["organization"].to(DEVICE)) +
+                0.2 * loss_fn(outputs["technical_3"], batch["technical"].to(DEVICE)) +
+                0.4 * loss_fn(outputs["total_14"], batch["total"].to(DEVICE))
             )
 
             loss.backward()
@@ -90,15 +147,31 @@ def train_model(model_name, csv_path="sinhala_dataset_final.csv",
             total_loss += loss.item()
 
         scheduler.step()
-        print(f"Epoch {epoch+1}/{epochs} Loss: {total_loss / len(train_loader)}")
+        print(f"✅ Epoch {epoch+1} Loss: {total_loss / len(train_loader):.4f}")
 
-    save_path = f"{model_name.replace('/', '_')}_sinhala_multihead.pt"
-    torch.save(model.state_dict(), save_path)
-    print("✔ Model saved:", save_path)
+    # =============================
+    # SAVE (HF STANDARD — FINAL)
+    # =============================
+    OUTPUT_DIR = "xlm-roberta-large-sinhala-multihead"
+
+    model.save_pretrained(OUTPUT_DIR)
+    tokenizer.save_pretrained(OUTPUT_DIR)
+
+    print("\n🎉 TRAINING COMPLETE")
+    print("📦 Model saved to:", OUTPUT_DIR)
+    print("✅ Ready for Hugging Face & backend loading")
 
 
+# =============================
+# ENTRY POINT
+# =============================
 if __name__ == "__main__":
     import sys
-    print("🟡 MAIN BLOCK RUNNING")
+
+    if len(sys.argv) < 2:
+        raise ValueError(
+            "Usage: python -m training.train_model xlm-roberta-large"
+        )
+
     model_name = sys.argv[1]
     train_model(model_name)

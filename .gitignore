@@ -2,31 +2,17 @@
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
-*.pkl
-*.pt
 
-# Virtual environment
+# Virtual environments
 venv/
+venv311/
 .env/
 
-# Jupyter Notebook checkpoints
-.ipynb_checkpoints/
-
-# Data & outputs
-data/
-outputs/
-
-# System
-.DS_Store
-Thumbs.db
-
-# Ignore HuggingFace model folders completely
-xlm-roberta-large-sinhala-multihead/
-xlm-roberta-base_sinhala_multihead.pt
-
-# (Optional) Ignore any local HF model directories
+# Model artifacts
 *.bin
-*.json
 *.pt
+*.safetensors
+xlm-roberta-large-sinhala-multihead/
 
+# HuggingFace cache
+.cache/
