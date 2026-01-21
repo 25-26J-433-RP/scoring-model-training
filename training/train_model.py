@@ -57,16 +57,20 @@ class SinhalaDataset(Dataset):
 # =============================
 def train_model(
     model_name: str,
-    csv_path: str = "sinhala_dataset_final.csv",
+    csv_path: str = "sinhala_dataset_final_with_dyslexic.csv",
     epochs: int = 20,
     batch_size: int = 4,
-    lr: float = 3e-5,
+    lr: float = 1e-5,  # Reduced learning rate to prevent NaN
 ):
     print(f"\n🚀 Training Sinhala Multi-Head Model using: {model_name}")
 
     # ---- Load dataset
     df = load_sinhala_dataset(csv_path)
     train_df, val_df = build_splits(df)
+    
+    print(f"📊 Dataset loaded: {len(df)} total essays")
+    print(f"   Training: {len(train_df)} essays")
+    print(f"   Validation: {len(val_df)} essays")
 
     # ---- Tokenizer (SOURCE OF TRUTH)
     tokenizer = AutoTokenizer.from_pretrained(
@@ -142,6 +146,10 @@ def train_model(
             )
 
             loss.backward()
+            
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
 
             total_loss += loss.item()
